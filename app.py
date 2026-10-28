@@ -25,7 +25,6 @@ UA = {
     "Accept-Language": "ar,fr;q=0.8,en;q=0.5",
 }
 
-# قائمة الكلمات المفتاحية الـ 100 المخصصة للسوق الجزائري
 KEYWORDS_100 = [
     "عرض لفترة محدودة", "احصل على قطعتين", "خصم 50%", "الكمية جد محدودة", "اطلب قطعتين والثانية",
     "المنتج الأصلي", "ضمان لمدة سنة", "السعر الجديد", "تخفيض استثنائي", "هدية مجانية",
@@ -595,14 +594,54 @@ with tab_batch:
 
 # ── تبويب 4: عرض النتائج والقاعدة ──
 with tab_res:
-    st.header("📊 قاعدة البيانات والمنتجات المحفوظة (`monopoly_finder.db`)")
+    st.header("📊 مركز النتائج وقاعدة البيانات (`monopoly_finder.db`)")
+
     with db() as c:
         df_db = pd.read_sql_query("SELECT * FROM products WHERE platform='Shopify' ORDER BY opportunity_index DESC", c)
 
     if df_db.empty:
         st.info("لا توجد منتجات شوبيفاي محفوظة حتى الآن.")
     else:
-        st.dataframe(df_db, use_container_width=True)
+        st.subheader("📋 قائمة المنتجات المكتشفة")
+
+        # عرض الجدول بتهيئة مخصصة للروابط والأسماء والوصف
+        st.dataframe(
+            df_db,
+            column_config={
+                "url": st.column_config.LinkColumn("رابط Shopify 🔗", display_text="فتح المتجر 🛒"),
+                "title": st.column_config.TextColumn("اسم المنتج 📦", width="medium"),
+                "effectiveness_notes": st.column_config.TextColumn("وصف وتحليل AI 💡", width="large"),
+                "price": st.column_config.NumberColumn("السعر (دج)", format="%.0f دج"),
+                "stock": st.column_config.NumberColumn("المخزون 📦"),
+                "quality_score": st.column_config.NumberColumn("تقييم الجودة ⭐", format="%.1f / 10"),
+                "opportunity_index": st.column_config.NumberColumn("مؤشر الفرصة 🔥", format="%.1f / 100"),
+                "break_even": st.column_config.NumberColumn("Break-Even CPA", format="%.0f دج"),
+                "updated_at": st.column_config.DatetimeColumn("تاريخ التحديث ⏱️")
+            },
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.divider()
+        st.subheader("🔍 تفاصيل المنتجات والوصف الشامل")
+
+        # عرض بطاقات تفصيلية تحتوي على الاسم، رابط Shopify المباشر، والوصف الكامل
+        for idx, row in df_db.iterrows():
+            title_disp = row.get("title") or "منتج بدون عنوان"
+            opp_disp = row.get("opportunity_index") or 0
+            with st.expander(f"📦 {title_disp} — (مؤشر الفرصة: {opp_disp})"):
+                c1, c2 = st.columns([3, 1])
+                with c1:
+                    st.markdown(f"**🔗 رابط Shopify:** [{row.get('url')}]({row.get('url')})")
+                    st.markdown(f"**📝 الوصف والتحليل:** {row.get('effectiveness_notes') or 'لا يوجد وصف متاح'}")
+                    if row.get('stock_note'):
+                        st.caption(f"📊 حركة المخزون: {row.get('stock_note')}")
+                with c2:
+                    st.metric("السعر المعروض", f"{row.get('price', 0):,.0f} دج")
+                    st.metric("مؤشر الفرصة", f"{row.get('opportunity_index', 0)} / 100")
+                    st.metric("تقييم AI", f"{row.get('quality_score', 0)} / 10")
+
+        st.divider()
         col_ex1, col_ex2 = st.columns(2)
-        col_ex1.download_button("⬇️ تصدير CSV", df_db.to_csv(index=False).encode("utf-8-sig"), "shopify_report.csv", "text/csv")
-        col_ex2.download_button("⬇️ تصدير JSON", df_db.to_json(orient="records", force_ascii=False), "shopify_report.json", "application/json")
+        col_ex1.download_button("⬇️ تصدير CSV", df_db.to_csv(index=False).encode("utf-8-sig"), "shopify_products_report.csv", "text/csv")
+        col_ex2.download_button("⬇️ تصدير JSON", df_db.to_json(orient="records", force_ascii=False), "shopify_products_report.json", "application/json")
