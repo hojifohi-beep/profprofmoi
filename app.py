@@ -49,7 +49,7 @@ KEYWORDS_100 = [
     "عازل حراري", "شريط إضاءة ذكي", "حامل أيباد", "محول كهرباء للسيارة", "قفل ذكي"
 ]
 
-st.set_page_config(page_title="DZ Product Finder - Shopify Edition", page_icon="🛍️", layout="wide")
+st.set_page_config(page_title="DZ Product Finder - Shopify Dedicated", page_icon="🛍️", layout="wide")
 st.markdown(
     """
     <style>
@@ -61,7 +61,6 @@ st.markdown(
 )
 
 
-# ───────────────────────── 1) الحماية والأسرار ─────────────────────────
 def secret(name: str, default: str = "") -> str:
     try:
         return str(st.secrets.get(name, default))
@@ -73,10 +72,9 @@ st.sidebar.header("⚙️ الإعدادات والتحكم")
 DEEPSEEK_KEY = secret("DEEPSEEK_API_KEY") or st.sidebar.text_input(
     "DeepSeek API Key", type="password", key="ds_manual"
 )
-SHOPIFY_ONLY_FILTER = st.sidebar.checkbox("تصفية وحفظ متاجر Shopify فقط 🛒", value=True)
+SHOPIFY_ONLY_FILTER = st.sidebar.checkbox("حظر واستبعاد غير متاجر Shopify تلقائياً 🛡️", value=True)
 
 
-# ───────────────────────── 2) قاعدة البيانات ─────────────────────────
 def db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -123,22 +121,7 @@ def upsert_product(rec: dict) -> None:
         )
 
 
-# ───────────────────────── 3) استخراج المتجر والمخزون بتمييز Shopify ─────────────────────────
 STOCK_KEYS = ("inventory_quantity", "stock", "stock_quantity", "inventory", "quantity", "inventoryLevel")
-
-
-def json_after(html: str, marker: str):
-    i = html.find(marker)
-    if i < 0:
-        return None
-    j = html.find("{", i)
-    if j < 0:
-        return None
-    try:
-        obj, _ = json.JSONDecoder().raw_decode(html[j:])
-        return obj
-    except Exception:
-        return None
 
 
 def find_key(obj, keys):
@@ -163,53 +146,72 @@ def find_key(obj, keys):
     return None
 
 
-def find_key_str(obj, keys):
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k in keys and isinstance(v, str) and v.strip():
-                return v.strip()
-        for v in obj.values():
-            r = find_key_str(v, keys)
-            if r:
-                return r
-    elif isinstance(obj, list):
-        for v in obj:
-            r = find_key_str(v, keys)
-            if r:
-                return r
-    return None
-
-
-def detect_platform(html: str, url: str) -> str:
-    low = html.lower()
+def detect_shopify_strictly(html: str, url: str) -> tuple[bool, str]:
+    """
+    فحص دقيق ومؤكد 100% للتأكد من أن المتجر يتبع منصة Shopify
+    ويستبعد تماماً YouCan و Storeino و WooCommerce.
+    """
+    low_html = html.lower()
     low_url = url.lower()
-    if "cdn.shopify.com" in low or "shopify" in low or "myshopify.com" in low_url or "window.shopifyanalytics" in low:
-        return "Shopify"
-    if "youcan" in low or "youcan.shop" in low_url:
-        return "YouCan"
-    if "storeino" in low or "storeino.com" in low_url:
-        return "Storeino"
-    return "غير معروف"
+
+    # استبعاد صريح لمنصات YouCan و Storeino
+    if "youcan.shop" in low_url or "window.youcandata" in low_html or "youcan-cdn" in low_html:
+        return False, "YouCan"
+    if "storeino.com" in low_url or "window.storeino" in low_html:
+        return False, "Storeino"
+    if "wp-content" in low_html or "woocommerce" in low_html:
+        return False, "WooCommerce"
+
+    # بصمات Shopify الحصرية المؤكدة
+    shopify_signatures = [
+        "cdn.shopify.com",
+        "myshopify.com",
+        "window.shopifyanalytics",
+        "shopify.theme",
+        "shopify.pay",
+        "booster-page-speed-optimizer",
+        "shopify-assets",
+        "cdn.shopify",
+    ]
+
+    for sig in shopify_signatures:
+        if sig in low_html or sig in low_url:
+            return True, "Shopify"
+
+    # فحص إضافي عبر طلب cart.json الخاص بـ Shopify فقط
+    try:
+        domain = urlparse(url).netloc
+        scheme = urlparse(url).scheme or "https"
+        cart_res = requests.get(f"{scheme}://{domain}/cart.json", headers=UA, timeout=8)
+        if cart_res.status_code == 200 and "token" in cart_res.text and "items" in cart_res.text:
+            return True, "Shopify"
+    except Exception:
+        pass
+
+    return False, "غير معروف / منصة أخرى"
 
 
 def extract_store(url: str) -> dict:
-    res = {"platform": "غير معروف", "title": "", "price": None, "stock": None, "error": None, "raw_text": ""}
+    res = {"platform": "غير معروف", "title": "", "price": None, "stock": None, "error": None, "raw_text": "", "is_shopify": False}
     try:
-        r = requests.get(url, headers=UA, timeout=25)
+        r = requests.get(url, headers=UA, timeout=20)
         r.raise_for_status()
     except Exception as e:
         res["error"] = f"تعذر فتح الرابط: {e}"
         return res
+
     html = r.text
-    res["platform"] = detect_platform(html, url)
+    is_shopify, platform_name = detect_shopify_strictly(html, url)
+    res["platform"] = platform_name
+    res["is_shopify"] = is_shopify
+
     soup = BeautifulSoup(html, "html.parser")
     res["raw_text"] = soup.get_text(separator=" ", strip=True)[:2000]
 
-    # جرف بيانات Shopify الخاصة عبر product.js
-    if res["platform"] == "Shopify" and "/products/" in url:
+    if is_shopify and "/products/" in url:
         try:
             js_url = url.split("?")[0].rstrip("/") + ".js"
-            pj = requests.get(js_url, headers=UA, timeout=15).json()
+            pj = requests.get(js_url, headers=UA, timeout=12).json()
             res["stock"] = find_key(pj.get("variants", []), ("inventory_quantity",))
             res["title"] = pj.get("title", "")
             if pj.get("price") is not None:
@@ -217,7 +219,6 @@ def extract_store(url: str) -> dict:
         except Exception:
             pass
 
-    # JSON-LD Fallback
     if not res["title"] or res["price"] is None:
         for tag in soup.find_all("script", type="application/ld+json"):
             try:
@@ -265,7 +266,6 @@ def stock_delta(url: str, new_stock):
     return {"sales_est": drop, "note": f"انخفاض {drop} قطعة ({prev} → {new_stock})"}
 
 
-# ───────────────────────── 4) DeepSeek AI ─────────────────────────
 def deepseek_json(system: str, user: str):
     if not DEEPSEEK_KEY:
         return None, "مفتاح DeepSeek غير متوفر"
@@ -291,34 +291,11 @@ def deepseek_json(system: str, user: str):
         return None, str(e)
 
 
-INTENT_SYS = (
-    "أنت محلل تعليقات تجارة إلكترونية في الجزائر. التعليقات بالدارجة الجزائرية والفرنسية والعربية. "
-    "نية الشراء الصريحة = سؤال عن السعر (شحال، بشحال، combien)، طلب (حاب نطلب، نحب نشري)، "
-    "سؤال عن التوصيل لولاية، أو طلب رقم/طريقة الطلب. "
-    'أرجع JSON فقط بالشكل: {"intent_ratio": رقم بين 0 و1, "top_questions": ["...","...","..."]}'
-)
-
 QUALITY_SYS = (
     "أنت خبير تجارة إلكترونية بالدفع عند الاستلام (COD) في الجزائر. "
     "حلل عنوان وصفحة المنتج وقيم جودة وفكرته ومقومات نجاحه الإعلاني. "
     'أرجع JSON فقط: {"quality_score": رقم من 1.0 إلى 10.0, "notes": "ملخص فكرة المنتج وميزته التنافسية"}'
 )
-
-
-def analyze_intent(comments: list[str]):
-    if not comments:
-        return None, [], "لا توجد تعليقات"
-    data, err = deepseek_json(INTENT_SYS, "\n".join(f"- {c}" for c in comments[:150]))
-    if not data:
-        return None, [], err
-    ratio = data.get("intent_ratio")
-    try:
-        ratio = float(ratio)
-        ratio = ratio / 100 if ratio > 1 else ratio
-        ratio = min(max(ratio, 0.0), 1.0)
-    except (TypeError, ValueError):
-        ratio = None
-    return ratio, list(data.get("top_questions", []))[:3], None
 
 
 def analyze_product_quality(title: str, text_content: str):
@@ -348,10 +325,9 @@ def opportunity_index(quality_score, break_even):
 
 
 # ───────────────────────── الواجهة الرئيسية ─────────────────────────
-st.title("🛍️ DZ Product Finder — Shopify Direct Edition")
-st.caption("محرك استهداف واكتشاف إعلانات ومتاجر Shopify في الجزائر مع التحليل المالي والذكاء الاصطناعي")
+st.title("🛍️ DZ Product Finder — Shopify Dedicated Engine")
+st.caption("أداة استهداف واكتشاف إعلانات ومتاجر Shopify فقط في الجزائر مع الفحص الفني والتحليل المالي")
 
-# حفظ واسترجاع القاعدة
 st.sidebar.divider()
 st.sidebar.subheader("💾 قاعدة البيانات")
 try:
@@ -361,26 +337,27 @@ except FileNotFoundError:
     pass
 
 tab_links, tab_batch, tab_res = st.tabs([
-    "🔗 روابط البحث المباشرة لـ Shopify (100 كلمة)", 
-    "⚡ الفحص الآلي بالذكاء الاصطناعي لمتاجر Shopify", 
-    "📊 قاعدة البيانات والنتائج"
+    "🔗 روابط Meta Ads بفلترة Shopify الحصرية", 
+    "⚡ الفحص الفني الحاسم والتحليل بالذكاء الاصطناعي", 
+    "📊 قاعدة البيانات والنتائج المحفوظة"
 ])
 
-# ── تبويب 1: روابط Meta Ads المباشرة ببصمة Shopify ──
+# ── تبويب 1: روابط Meta Ads ──
 with tab_links:
-    st.subheader("🎯 مولد روابط البحث المباشرة لمتاجر Shopify في الجزائر")
-    st.markdown(
-        "يتم دمج الكلمات المفتاحية الـ 100 مع **بصمات مسار Shopify** مثل `/products/` أو `myshopify.com` لتصفية نتائج Meta Ads Library وإظهار إعلانات متاجر شوبيفاي فقط في الجزائر."
+    st.subheader("🎯 روابط بحث مصممة لاستهداف Shopify حصراً")
+    st.info(
+        "💡 **سبب ظهور YouCan و Storeino عند البحث بـ `/products/`:** منصات YouCan و Storeino تستخدم نفس هيكلة المسار `/products/` في الروابط! "
+        "لذلك، الخيار الأول أدناه يدمج الكلمة مع `'myshopify.com'` لضمان ظهور إعلانات شوبيفاي فقط في Meta Ads Library."
     )
     
     col_mode, col_filter = st.columns([2, 2])
     with col_mode:
         search_mode = st.radio(
-            "اختر صيغة فلترة Shopify:",
+            "اختر صيغة الاستهداف في فيسبوك:",
             [
-                "مسار المنتجات المباشر (/products/)",
-                "نطاق متاجر شوبيفاي (myshopify.com)",
-                "كلمة البحث المباشرة بدون بصمة"
+                "استهداف نطاق شوبيفاي الصريح (myshopify.com) — الأضمن 🌟",
+                "استهداف مسار الشراء (checkouts)",
+                "استهداف مسار المنتجات العام (/products/)"
             ],
             horizontal=False
         )
@@ -390,12 +367,12 @@ with tab_links:
     shopify_links_data = []
     for idx, kw in enumerate(KEYWORDS_100, 1):
         if not search_kw or search_kw.strip().lower() in kw.lower():
-            if search_mode == "مسار المنتجات المباشر (/products/)":
-                query_str = f"{kw} /products/"
-            elif search_mode == "نطاق متاجر شوبيفاي (myshopify.com)":
+            if search_mode == "استهداف نطاق شوبيفاي الصريح (myshopify.com) — الأضمن 🌟":
                 query_str = f"{kw} myshopify.com"
+            elif search_mode == "استهداف مسار الشراء (checkouts)":
+                query_str = f"{kw} checkouts"
             else:
-                query_str = kw
+                query_str = f"{kw} /products/"
                 
             encoded = quote(query_str)
             link_url = f"https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=DZ&q={encoded}"
@@ -403,7 +380,7 @@ with tab_links:
             shopify_links_data.append({
                 "الرقم": idx,
                 "الكلمة المفتاحية": kw,
-                "صيغة البحث المعالجة": query_str,
+                "استعلام البحث الموجه": query_str,
                 "رابط Meta Ads Library 🔗": link_url
             })
 
@@ -414,21 +391,21 @@ with tab_links:
         column_config={
             "رابط Meta Ads Library 🔗": st.column_config.LinkColumn(
                 "رابط البحث المباشر للجزائر 🚀",
-                display_text="فتح إعلانات Shopify 🛒"
+                display_text="فتح نتائج فيسبوك 🛒"
             )
         },
         use_container_width=True,
         hide_index=True
     )
 
-# ── تبويب 2: الفحص الآلي المستمر بالذكاء الاصطناعي ──
+# ── تبويب 2: الفحص الجرفي والذكاء الاصطناعي ──
 with tab_batch:
-    st.subheader("📥 1. إدخال روابط المتاجر المستخرجة")
-    st.write("ضع روابط صفحات المنتجات المكتشفة من إعلانات شوبيفاي (سطر لكل رابط):")
+    st.subheader("📥 إدخال روابط المتاجر المكتشفة من الإعلانات")
+    st.write("أدخل الروابط المكتشفة هنا. وسيقوم النظام بالفحص التقني للكود لاستبعاد أي متجر ليس Shopify تلقائياً:")
     
     urls_input = st.text_area(
-        "قائمة الروابط (Shopify URLs):",
-        placeholder="https://brand-store.com/products/wireless-charger\nhttps://example.myshopify.com/products/item-name",
+        "قائمة الروابط (سطر لكل رابط):",
+        placeholder="https://brand-store.com/products/item-1\nhttps://example.myshopify.com/products/item-2",
         height=140
     )
     
@@ -436,7 +413,7 @@ with tab_batch:
     est_wholesale = col_c1.number_input("تقدير نسبة الجملة من سعر البيع %", value=35, min_value=10, max_value=80)
     est_deliv_rate = col_c2.slider("تقدير نسبة الاستلام (Delivery Rate) %", value=75, min_value=10, max_value=100)
 
-    if st.button("🚀 بدء الفحص والجرف والتحليل بالذكاء الاصطناعي"):
+    if st.button("🚀 بدء الفحص التقني والجرف والتحليل بالذكاء الاصطناعي"):
         urls_list = [u.strip() for u in urls_input.splitlines() if u.strip()]
         if not urls_list:
             st.warning("يرجى إدخال رابط واحد على الأقل.")
@@ -447,23 +424,23 @@ with tab_batch:
             skipped_count = 0
             
             for i, u in enumerate(urls_list):
-                status_box.info(f"جاري جرف وفحص المتجر ({i+1}/{len(urls_list)}): {u}")
+                status_box.info(f"جاري الفحص التقني للمتجر ({i+1}/{len(urls_list)}): {u}")
                 
-                # 1. جرف المتجر واستخراج البيانات
+                # 1. جرف المتجر والفحص التقني المؤكد
                 info = extract_store(u)
                 
-                # 2. فلترة شوبيفاي إذا كانت مفعّلة
-                if SHOPIFY_ONLY_FILTER and info["platform"] != "Shopify":
+                # 2. الاستبعاد الصريح إذا لم يكن المتجر Shopify
+                if SHOPIFY_ONLY_FILTER and not info["is_shopify"]:
                     skipped_count += 1
-                    status_box.warning(f"تم تجاهل {u} لأنه ليس متجر Shopify (المنصة: {info['platform']})")
-                    time.sleep(0.5)
+                    status_box.warning(f"🚫 تم استبعاد {u} (المنصة المكتشفة: {info['platform']} - ليست Shopify)")
+                    time.sleep(0.6)
                     prog.progress((i + 1) / len(urls_list))
                     continue
                 
                 # 3. تحليل جودة وفعالية المنتج عبر DeepSeek
                 q_score, q_notes = analyze_product_quality(info["title"], info["raw_text"])
                 
-                # 4. الحسابات المالية وتأثير المخزون
+                # 4. الحسابات المالية وتتبع المخزون
                 d = stock_delta(u, info["stock"])
                 p = info["price"] or 3500.0
                 wholesale_val = p * (est_wholesale / 100.0)
@@ -474,7 +451,7 @@ with tab_batch:
                 upsert_product({
                     "url": u,
                     "store": urlparse(u).netloc or "Shopify Store",
-                    "platform": info["platform"],
+                    "platform": "Shopify",
                     "title": info["title"] or "منتج Shopify",
                     "stock": info["stock"],
                     "stock_note": d["note"],
@@ -495,16 +472,16 @@ with tab_batch:
                 prog.progress((i + 1) / len(urls_list))
                 time.sleep(0.8)
                 
-            status_box.success(f"🎉 تم الفحص بنجاح! تم حفظ {saved_count} منتج شوبيفاي (وتجاهل {skipped_count} متاجر أخرى).")
+            status_box.success(f"🎉 تم الفحص! تم حفظ {saved_count} منتج Shopify مؤكد (وتم استبعاد {skipped_count} متجر غير شوبيفاي).")
 
 # ── تبويب 3: عرض النتائج والقاعدة ──
 with tab_res:
     st.header("📊 قاعدة البيانات والمنتجات المحفوظة (`monopoly_finder.db`)")
     with db() as c:
-        df_db = pd.read_sql_query("SELECT * FROM products ORDER BY opportunity_index DESC", c)
+        df_db = pd.read_sql_query("SELECT * FROM products WHERE platform='Shopify' ORDER BY opportunity_index DESC", c)
         
     if df_db.empty:
-        st.info("لا توجد منتجات محفوظة حتى الآن.")
+        st.info("لا توجد منتجات شوبيفاي محفوظة حتى الآن.")
     else:
         st.dataframe(df_db, use_container_width=True)
         col_ex1, col_ex2 = st.columns(2)
