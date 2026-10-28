@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-DZ Product Finder - لوحة اكتشاف المنتجات الرابحة (COD الجزائر - Shopify Dedicated)
+DZ Product Finder - لوحة اكتشاف المنتجات الرابحة (COD الجزائر - Shopify Dedicated & Smart Extractor)
 تشغيل:  streamlit run app.py
 """
 import io
@@ -9,7 +9,7 @@ import re
 import sqlite3
 import time
 from datetime import datetime, timezone
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse, quote, parse_qs, unquote
 
 import pandas as pd
 import requests
@@ -104,7 +104,6 @@ def init_db() -> None:
                 url TEXT, stock INTEGER, ts TEXT
             )"""
         )
-        # التحديث والتعديل الآلي لهيكل القاعدة القديمة عند إضافة أعمدة جديدة
         existing_cols = [row["name"] for row in c.execute("PRAGMA table_info(products)").fetchall()]
         new_columns = {
             "quality_score": "REAL",
@@ -169,14 +168,9 @@ def find_key(obj, keys):
 
 
 def detect_shopify_strictly(html: str, url: str) -> tuple[bool, str]:
-    """
-    فحص دقيق ومؤكد 100% للتأكد من أن المتجر يتبع منصة Shopify
-    ويستبعد تماماً YouCan و Storeino و WooCommerce.
-    """
     low_html = html.lower()
     low_url = url.lower()
 
-    # استبعاد صريح لمنصات YouCan و Storeino
     if "youcan.shop" in low_url or "window.youcandata" in low_html or "youcan-cdn" in low_html:
         return False, "YouCan"
     if "storeino.com" in low_url or "window.storeino" in low_html:
@@ -184,10 +178,9 @@ def detect_shopify_strictly(html: str, url: str) -> tuple[bool, str]:
     if "wp-content" in low_html or "woocommerce" in low_html:
         return False, "WooCommerce"
 
-    # بصمات Shopify الحصرية المؤكدة
     shopify_signatures = [
         "cdn.shopify.com",
-        'myshopify.com',
+        "myshopify.com",
         "window.shopifyanalytics",
         "shopify.theme",
         "shopify.pay",
@@ -200,7 +193,6 @@ def detect_shopify_strictly(html: str, url: str) -> tuple[bool, str]:
         if sig in low_html or sig in low_url:
             return True, "Shopify"
 
-    # فحص إضافي عبر طلب cart.json الخاص بـ Shopify فقط
     try:
         domain = urlparse(url).netloc
         scheme = urlparse(url).scheme or "https"
@@ -346,6 +338,60 @@ def opportunity_index(quality_score, break_even):
     return round(s, 1)
 
 
+# ───────────────────────── دالة استخراج وتصفية روابط Shopify الذكية من الإعلانات ─────────────────────────
+EXCLUDE_DOMAINS = [
+    "facebook.com", "fb.me", "instagram.com", "whatsapp.com", "wa.me",
+    "youtube.com", "google.com", "t.me", "telegram.me", "tiktok.com"
+]
+
+
+def clean_and_unmask_url(url_str: str) -> str:
+    """فك روابط إعادة توجيه فيسبوك المفرغة (l.facebook.com)"""
+    if "l.facebook.com/l.php" in url_str or "lm.facebook.com/l.php" in url_str:
+        parsed = urlparse(url_str)
+        qs = parse_qs(parsed.query)
+        if "u" in qs:
+            return unquote(qs["u"][0])
+    return url_str
+
+
+def extract_shopify_urls_from_raw_text(raw_text: str) -> list[str]:
+    """
+    استخراج الروابط من أي نص إعلاني مع فك التشفير وتصفية المنصات الاجتماعية.
+    """
+    url_pattern = r'https?://[^\s<>"]+|www\.[^\s<>"]+|[a-zA-Z0-9.-]+\.(?:com|shop|store|net|site|online|storeino|youcan)/[^\s<>"]*'
+    found_urls = re.findall(url_pattern, raw_text)
+
+    candidate_urls = []
+    seen = set()
+
+    for u in found_urls:
+        if not u.startswith("http"):
+            u = "https://" + u
+
+        u = clean_and_unmask_url(u)
+        domain = urlparse(u).netloc.lower()
+
+        # استبعاد منصات التواصل
+        if any(ex in domain for ex in EXCLUDE_DOMAINS):
+            continue
+
+        if u not in seen:
+            seen.add(u)
+            candidate_urls.append(u)
+
+    # دعم الذكاء الاصطناعي DeepSeek لاستخراج الروابط غير المباشرة المكتوبة كنصوص
+    if DEEPSEEK_KEY and len(candidate_urls) == 0 and len(raw_text.strip()) > 20:
+        ai_sys = 'أنت أداة استخراج روابط تجارة إلكترونية. أخرج جميع روابط المتاجر الإلكترونية أو الدومينات المذكورة في النص بالشكل: {"urls": ["https://..."]}'
+        ai_data, _ = deepseek_json(ai_sys, raw_text[:2500])
+        if ai_data and isinstance(ai_data.get("urls"), list):
+            for u in ai_data["urls"]:
+                if isinstance(u, str) and u.startswith("http") and u not in seen:
+                    candidate_urls.append(u)
+
+    return candidate_urls
+
+
 # ───────────────────────── الواجهة الرئيسية ─────────────────────────
 st.title("🛍️ DZ Product Finder — Shopify Dedicated Engine")
 st.caption("أداة استهداف واكتشاف إعلانات ومتاجر Shopify فقط في الجزائر مع الفحص الفني والتحليل المالي")
@@ -358,8 +404,9 @@ try:
 except FileNotFoundError:
     pass
 
-tab_links, tab_batch, tab_res = st.tabs([
-    "🔗 روابط Meta Ads بفلترة Shopify الحصرية", 
+tab_links, tab_extractor, tab_batch, tab_res = st.tabs([
+    "🔗 روابط Meta Ads بفلترة Shopify",
+    "🧠 مستخرج روابط Shopify من الإعلانات والنصوص", 
     "⚡ الفحص الفني الحاسم والتحليل بالذكاء الاصطناعي", 
     "📊 قاعدة البيانات والنتائج المحفوظة"
 ])
@@ -371,7 +418,7 @@ with tab_links:
         "💡 **سبب ظهور YouCan و Storeino عند البحث بـ `/products/`:** منصات YouCan و Storeino تستخدم نفس هيكلة المسار `/products/` في الروابط! "
         "لذلك، الخيار الأول أدناه يدمج الكلمة مع `'myshopify.com'` لضمان ظهور إعلانات شوبيفاي فقط في Meta Ads Library."
     )
-    
+
     col_mode, col_filter = st.columns([2, 2])
     with col_mode:
         search_mode = st.radio(
@@ -395,10 +442,10 @@ with tab_links:
                 query_str = f"{kw} checkouts"
             else:
                 query_str = f"{kw} /products/"
-                
+
             encoded = quote(query_str)
             link_url = f"https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=DZ&q={encoded}"
-            
+
             shopify_links_data.append({
                 "الرقم": idx,
                 "الكلمة المفتاحية": kw,
@@ -407,7 +454,7 @@ with tab_links:
             })
 
     df_links = pd.DataFrame(shopify_links_data)
-    
+
     st.dataframe(
         df_links,
         column_config={
@@ -420,17 +467,72 @@ with tab_links:
         hide_index=True
     )
 
-# ── تبويب 2: الفحص الجرفي والذكاء الاصطناعي ──
+# ── تبويب 2: مستخرج روابط Shopify الذكي من الإعلانات والنصوص (الجديد 🚀) ──
+with tab_extractor:
+    st.subheader("🧠 استخراج وتصفية روابط Shopify المخبأة داخل الإعلانات والنصوص")
+    st.markdown(
+        """انسخ **جميع نصوص الإعلانات**، أو **كود صفحة Meta Ads Library**، أو **قائمة روابط متعددة مختلطة** والصقها أدناه. 
+        سيتكفل الذكاء الاصطناعي مع كود Regex بـ:
+        1. استخراج جميع الروابط الحقيقية واستبعاد روابط التواصل الاجتماعي (فيسبوك، واتساب، إنستغرام).
+        2. فك التشفير عن روابط إعادة التوجيه المفرغة (`l.facebook.com`).
+        3. **فحص الكود البرمجي للمتاجر المستخرجة وإبقاء متاجر Shopify المؤكدة فقط!**"""
+    )
+
+    raw_ad_content = st.text_area(
+        "ضع محتوى الإعلانات / الروابط المنسوخة من فيسبوك هنا:",
+        placeholder="مثال:\nاشتري الآن من متجرنا: https://l.facebook.com/l.php?u=https://brand.myshopify.com/products/item\nأو زورا موقعنا: www.store.com/products/cooler",
+        height=180
+    )
+
+    if st.button("🔍 استخراج وتصفية متاجر Shopify الذكية"):
+        if not raw_ad_content.strip():
+            st.warning("يرجى لصق نص الإعلانات أو الروابط أولاً.")
+        else:
+            with st.spinner("جاري تحليل النص، فك الروابط، وفحص المنصات البرمجية للمتاجر..."):
+                extracted_candidates = extract_shopify_urls_from_raw_text(raw_ad_content)
+
+                if not extracted_candidates:
+                    st.error("لم يتم العثور على أي روابط متاجر خارجية في النص المنسوخ.")
+                else:
+                    st.info(f"تم العثور على {len(extracted_candidates)} رابط مرشح. جاري التحقق الفني من منصة Shopify...")
+
+                    verified_shopify = []
+                    rejected_stores = []
+
+                    for cand in extracted_candidates:
+                        is_shop, plat = detect_shopify_strictly("", cand)
+                        if is_shop:
+                            verified_shopify.append(cand)
+                        else:
+                            rejected_stores.append({"الرابط": cand, "المنصة": plat})
+
+                    st.success(f"✅ تم اكتشاف {len(verified_shopify)} متجر Shopify مؤكد!")
+
+                    if verified_shopify:
+                        st.subheader("🛒 متاجر Shopify المكتشفة الجاهزة للفحص:")
+                        st.code("\n".join(verified_shopify), language="text")
+
+                        if st.button("⚡ نقل المتاجر المكتشفة إلى الفحص الآلي والجرف المالي"):
+                            st.session_state["auto_urls_input"] = "\n".join(verified_shopify)
+                            st.success("تم نقل الروابط بنجاح إلى تبويب 'الفحص الفني'! انتقل للتبويب التالي لتشغيل التحليل.")
+
+                    if rejected_stores:
+                        with st.expander("🚫 المتاجر المستبعدة (منصات أخرى وليست Shopify):"):
+                            st.dataframe(pd.DataFrame(rejected_stores), use_container_width=True)
+
+# ── تبويب 3: الفحص الجرفي والذكاء الاصطناعي ──
 with tab_batch:
     st.subheader("📥 إدخال روابط المتاجر المكتشفة من الإعلانات")
     st.write("أدخل الروابط المكتشفة هنا. وسيقوم النظام بالفحص التقني للكود لاستبعاد أي متجر ليس Shopify تلقائياً:")
-    
+
+    default_urls = st.session_state.get("auto_urls_input", "")
     urls_input = st.text_area(
         "قائمة الروابط (سطر لكل رابط):",
+        value=default_urls,
         placeholder="https://brand-store.com/products/item-1\nhttps://example.myshopify.com/products/item-2",
         height=140
     )
-    
+
     col_c1, col_c2 = st.columns(2)
     est_wholesale = col_c1.number_input("تقدير نسبة الجملة من سعر البيع %", value=35, min_value=10, max_value=80)
     est_deliv_rate = col_c2.slider("تقدير نسبة الاستلام (Delivery Rate) %", value=75, min_value=10, max_value=100)
@@ -444,32 +546,27 @@ with tab_batch:
             status_box = st.empty()
             saved_count = 0
             skipped_count = 0
-            
+
             for i, u in enumerate(urls_list):
                 status_box.info(f"جاري الفحص التقني للمتجر ({i+1}/{len(urls_list)}): {u}")
-                
-                # 1. جرف المتجر والفحص التقني المؤكد
+
                 info = extract_store(u)
-                
-                # 2. الاستبعاد الصريح إذا لم يكن المتجر Shopify
+
                 if SHOPIFY_ONLY_FILTER and not info["is_shopify"]:
                     skipped_count += 1
                     status_box.warning(f"🚫 تم استبعاد {u} (المنصة المكتشفة: {info['platform']} - ليست Shopify)")
                     time.sleep(0.6)
                     prog.progress((i + 1) / len(urls_list))
                     continue
-                
-                # 3. تحليل جودة وفعالية المنتج عبر DeepSeek
+
                 q_score, q_notes = analyze_product_quality(info["title"], info["raw_text"])
-                
-                # 4. الحسابات المالية وتتبع المخزون
+
                 d = stock_delta(u, info["stock"])
                 p = info["price"] or 3500.0
                 wholesale_val = p * (est_wholesale / 100.0)
                 fin = financials(p, wholesale=wholesale_val, delivery=600, ad_cost=1000, delivery_rate=est_deliv_rate/100.0, return_fee=400)
                 opp_idx = opportunity_index(q_score, fin["break_even"])
-                
-                # 5. الحفظ في SQLite
+
                 upsert_product({
                     "url": u,
                     "store": urlparse(u).netloc or "Shopify Store",
@@ -493,15 +590,15 @@ with tab_batch:
                 saved_count += 1
                 prog.progress((i + 1) / len(urls_list))
                 time.sleep(0.8)
-                
+
             status_box.success(f"🎉 تم الفحص! تم حفظ {saved_count} منتج Shopify مؤكد (وتم استبعاد {skipped_count} متجر غير شوبيفاي).")
 
-# ── تبويب 3: عرض النتائج والقاعدة ──
+# ── تبويب 4: عرض النتائج والقاعدة ──
 with tab_res:
     st.header("📊 قاعدة البيانات والمنتجات المحفوظة (`monopoly_finder.db`)")
     with db() as c:
         df_db = pd.read_sql_query("SELECT * FROM products WHERE platform='Shopify' ORDER BY opportunity_index DESC", c)
-        
+
     if df_db.empty:
         st.info("لا توجد منتجات شوبيفاي محفوظة حتى الآن.")
     else:
