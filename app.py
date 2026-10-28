@@ -104,6 +104,28 @@ def init_db() -> None:
                 url TEXT, stock INTEGER, ts TEXT
             )"""
         )
+        # التحديث والتعديل الآلي لهيكل القاعدة القديمة عند إضافة أعمدة جديدة
+        existing_cols = [row["name"] for row in c.execute("PRAGMA table_info(products)").fetchall()]
+        new_columns = {
+            "quality_score": "REAL",
+            "effectiveness_notes": "TEXT",
+            "price": "REAL",
+            "wholesale": "REAL",
+            "delivery": "REAL",
+            "ad_cost": "REAL",
+            "delivery_rate": "REAL",
+            "return_fee": "REAL",
+            "break_even": "REAL",
+            "net_profit": "REAL",
+            "opportunity_index": "REAL",
+            "updated_at": "TEXT"
+        }
+        for col_name, col_type in new_columns.items():
+            if col_name not in existing_cols:
+                try:
+                    c.execute(f"ALTER TABLE products ADD COLUMN {col_name} {col_type}")
+                except Exception:
+                    pass
 
 
 init_db()
@@ -165,7 +187,7 @@ def detect_shopify_strictly(html: str, url: str) -> tuple[bool, str]:
     # بصمات Shopify الحصرية المؤكدة
     shopify_signatures = [
         "cdn.shopify.com",
-        "myshopify.com",
+        'myshopify.com',
         "window.shopifyanalytics",
         "shopify.theme",
         "shopify.pay",
