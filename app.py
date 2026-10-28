@@ -9,7 +9,7 @@ import re
 import sqlite3
 import time
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 import pandas as pd
 import requests
@@ -24,7 +24,30 @@ UA = {
     ),
     "Accept-Language": "ar,fr;q=0.8,en;q=0.5",
 }
-DEFAULT_KEYWORDS = ["توصيل 58 ولاية", "الدفع عند الاستلام", "توصيل مجاني"]
+
+# قائمة الكلمات المفتاحية الـ 100 المخصصة للسوق الجزائري
+KEYWORDS_100 = [
+    "عرض لفترة محدودة", "احصل على قطعتين", "خصم 50%", "الكمية جد محدودة", "اطلب قطعتين والثانية",
+    "المنتج الأصلي", "ضمان لمدة سنة", "السعر الجديد", "تخفيض استثنائي", "هدية مجانية",
+    "استفد من العرض", "قبل نفاد الكمية", "أطلب الآن واستفد", "باك اقتصادي", "عرض العيد",
+    "توفير حصري", "الأكثر مبيعاً", "السعر الأصلي", "عرض خاص جداً", "احصل عليه اليوم",
+    "حل مشكلة", "تخلص من", "سهل الاستخدام", "بدون عناء", "توفير المساحة",
+    "مضاد للماء", "مضاد للانزلاق", "تنظيف عميق", "أداة ذكية", "حماية كاملة",
+    "بديل احترافي", "تصميم عصري", "متعدد الاستخدامات", "قابل للطي", "بدون حفر",
+    "نتيجة فورية", "توفير الوقت", "مقاوم الصدمات", "تقنية حديثة", "حجم مصغر",
+    "مشد ظهر", "مصحح القامة", "جهاز مساج", "فرشاة حرارية", "آلة إزالة الشعر",
+    "سيروم علاج", "كريم تبييض", "مساج محمول", "تخفيف آلام", "آلة حلاقة احترافية",
+    "مشد جسم", "عناية بالبشرة", "تبييض الأسنان", "تكثيف الشعر", "جهاز تنظيف الوجه",
+    "حزام تخسيس", "مقشر طبيعي", "مساج للقدمين", "زيت طبيعي", "علاج المفاصل",
+    "فرامة كهربائية", "قاطعة الخضار", "ممسحة سحرية", "منظم مطبخ", "منظم ملابس",
+    "إضاءة استشعار", "حامل ذكي", "أداة ضغط", "وعاء حافظ للحرارة", "مطحنة توابل",
+    "موزع ماء أوتوماتيكي", "منظم ثلاجة", "مقلاة هوائية", "بخاخ زيت", "رفوف تنظيم",
+    "غطاء سيليكون", "ماكينة خياطة محمولة", "أداة تنظيف الزجاج", "عصارة فواكه", "منظم حمام",
+    "حامل هاتف للسيارة", "منفاخ عجلات", "كاميرا مراقبة", "بخاخ تنظيف المحرك", "سماعات لاسلكية",
+    "شاحن سريع", "مضخة غسيل السيارات", "غطاء سيارة", "جهاز تتبع", "إضاءة LED للسيارة",
+    "معطر سيارة آلي", "منظم مقعد السيارة", "ساعة ذكية", "مكبر صوت بلوتوث", "أداة فحص الأعطال",
+    "عازل حراري", "شريط إضاءة ذكي", "حامل أيباد", "محول كهرباء للسيارة", "قفل ذكي"
+]
 
 st.set_page_config(page_title="DZ Product Finder", page_icon="📦", layout="wide")
 st.markdown(
@@ -137,8 +160,6 @@ def age_days(start) -> int:
 
 
 def fetch_ads_api(keywords, token, limit=200):
-    """Meta Ad Library API الرسمي. تنبيه: تغطية الإعلانات التجارية خارج الاتحاد
-    الأوروبي محدودة جداً، فقد يعود فارغاً للجزائر. المسار البديل: الاستيراد اليدوي."""
     rows, err = [], None
     for kw in keywords:
         try:
@@ -169,13 +190,12 @@ def fetch_ads_api(keywords, token, limit=200):
                         "snapshot": ad.get("ad_snapshot_url", ""),
                     }
                 )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             err = str(e)
     return rows, err
 
 
 def filter_and_group(rows, min_age=7):
-    """يجمع بالمتجر/الرابط، يحسب عدد النسخ الإعلانية وأقدم تاريخ، ويستبعد الجديد."""
     groups = {}
     for r in rows:
         key = r.get("url") or r.get("store")
@@ -215,7 +235,6 @@ def json_after(html: str, marker: str):
 
 
 def find_key(obj, keys):
-    """بحث تراجعي عن أول قيمة رقمية لأحد المفاتيح."""
     if isinstance(obj, dict):
         for k, v in obj.items():
             if k in keys:
@@ -253,14 +272,13 @@ def extract_store(url: str) -> dict:
     try:
         r = requests.get(url, headers=UA, timeout=25)
         r.raise_for_status()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         res["error"] = f"تعذر فتح الرابط: {e}"
         return res
     html = r.text
     res["platform"] = detect_platform(html)
     soup = BeautifulSoup(html, "html.parser")
 
-    # ld+json
     for tag in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(tag.string or "")
@@ -282,7 +300,6 @@ def extract_store(url: str) -> dict:
                     if lvl is not None and res["stock"] is None:
                         res["stock"] = lvl
 
-    # كائنات JS المضمنة
     for marker in (
         "window.YouCanData",
         "window.storeino.product",
@@ -298,7 +315,6 @@ def extract_store(url: str) -> dict:
             if t:
                 res["title"] = t
 
-    # Shopify: product.js
     if res["stock"] is None and res["platform"] == "Shopify" and "/products/" in url:
         try:
             pj = requests.get(url.split("?")[0].rstrip("/") + ".js", headers=UA, timeout=15).json()
@@ -332,7 +348,6 @@ def find_key_str(obj, keys):
 
 
 def stock_delta(url: str, new_stock):
-    """يسجل المخزون ويقارن بآخر قياس. القفزات الكبيرة تُعد تعديل أدمين وتُتجاهل."""
     if new_stock is None:
         return {"sales_est": None, "note": "لا توجد بيانات مخزون"}
     with db() as c:
@@ -376,7 +391,7 @@ def deepseek_json(system: str, user: str):
         r.raise_for_status()
         content = r.json()["choices"][0]["message"]["content"]
         return json.loads(content), None
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return None, str(e)
 
 
@@ -424,12 +439,6 @@ def analyze_risk(complaints: list[str]):
 
 # ───────────────────────── 6) الحاسبة المالية ─────────────────────────
 def financials(price, wholesale, delivery, ad_cost, delivery_rate, return_fee):
-    """
-    لكل طلب مسجَّل:
-      الربح المتوقع = نسبة_الاستلام × (سعر_البيع − الجملة − التوصيل)
-                      − (1 − نسبة_الاستلام) × تكلفة_الرجوع − تكلفة_الإعلان
-    نقطة التعادل (Break-Even CPA) = أقصى تكلفة إعلان لكل طلب دون خسارة.
-    """
     d = min(max(delivery_rate, 0.0), 1.0)
     unit_margin = price - wholesale - delivery
     break_even = d * unit_margin - (1 - d) * return_fee
@@ -438,11 +447,10 @@ def financials(price, wholesale, delivery, ad_cost, delivery_rate, return_fee):
 
 
 def opportunity_index(age, copies, intent, risk, break_even):
-    """مؤشر 0–100 (موثّق): عمر الحملة 25 + عدد النسخ 15 + نية الشراء 25 + هامش التعادل 25 + المخاطر 10."""
     s = min(age / 30, 1) * 25 + min(copies / 5, 1) * 15
     s += (intent if intent is not None else 0.0) * 25
     s += min(max(break_even / 3000, 0), 1) * 25
-    s += ((10 - risk) / 10 * 10) if risk is not None else 5  # غير محدد = محايد
+    s += ((10 - risk) / 10 * 10) if risk is not None else 5
     return round(s, 1)
 
 
@@ -470,43 +478,62 @@ tab_disc, tab_one, tab_res = st.tabs(["🔎 الاكتشاف", "🧪 تحليل 
 # ── تبويب الاكتشاف ──
 with tab_disc:
     st.markdown(
-        "**مصدر الإعلانات:** Meta Ad Library API الرسمي، أو استيراد يدوي. "
-        "ملاحظة: الـAPI الرسمي يغطي الإعلانات التجارية خارج أوروبا بشكل محدود، "
-        "والزحف المباشر لواجهة المكتبة يخالف شروط Meta ويتعطل كثيراً؛ لذلك الاستيراد اليدوي هو المسار الموثوق."
+        "**مصدر الإعلانات:** Meta Ad Library API الرسمي، أو الاستيراد اليدوي / البحث المباشر.\n"
+        "ملاحظة: الـ API الرسمي يغطي الإعلانات التجاريّة خارج أوروبا بشكل محدود. الخيار اليدوي يمنحك روابط بحث مباشرة ومجانية في مكتبة الإعلانات."
     )
     min_age = st.number_input("الحد الأدنى لعمر الإعلان (أيام)", 1, 90, 7)
-    src = st.radio("المصدر", ["Meta Ad Library API", "استيراد يدوي (CSV أو لصق)"], horizontal=True)
+    src = st.radio("المصدر", ["البحث المباشر والاستيراد اليدوي (موصى به)", "Meta Ad Library API"], horizontal=True)
     rows = []
-    if src.startswith("Meta"):
-        kws = st.text_area("الكلمات المفتاحية (سطر لكل كلمة)", "\n".join(DEFAULT_KEYWORDS)).splitlines()
-        if st.button("🚀 ابدأ المسح"):
+    
+    if src == "Meta Ad Library API":
+        kws = st.text_area("الكلمات المفتاحية (سطر لكل كلمة)", "\n".join(KEYWORDS_100[:5])).splitlines()
+        if st.button("🚀 ابدأ المسح عبر API"):
             if not META_TOKEN:
-                st.error("أدخل META_ACCESS_TOKEN أو استعمل الاستيراد اليدوي.")
+                st.error("أدخل META_ACCESS_TOKEN في الشريط الجانبي أو استعمل خيار البحث المباشر.")
             else:
                 with st.spinner("جارٍ الاستعلام..."):
                     rows, err = fetch_ads_api([k for k in kws if k.strip()], META_TOKEN)
                 if err:
                     st.warning(f"Meta: {err}")
                 if not rows:
-                    st.info("لا نتائج. جرّب الاستيراد اليدوي.")
+                    st.info("لا نتائج من API Meta. استخدم خيار «البحث المباشر والاستيراد اليدوي».")
     else:
-        st.caption("الأعمدة: url, store, start (YYYY-MM-DD) — صف لكل نسخة إعلانية.")
+        st.subheader("🔎 مولد روابط البحث المباشرة في Meta Ads Library")
+        col_k1, col_k2 = st.columns([2, 1])
+        with col_k1:
+            selected_kw = st.selectbox("اختر كلمة مفتاحية من الـ 100 كلمة المجهزة للجزائر:", KEYWORDS_100)
+        
+        encoded_kw = quote(selected_kw)
+        search_link = f"https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=DZ&q={encoded_kw}"
+        
+        with col_k2:
+            st.write(" ")
+            st.write(" ")
+            st.markdown(f'<a href="{search_link}" target="_blank"><button style="background-color:#1877F2;color:white;border:none;padding:10px 18px;border-radius:8px;cursor:pointer;font-weight:bold;width:100%;">🔗 فتح الكلمة في Meta Ads Library</button></a>', unsafe_allow_html=True)
+        
+        st.markdown(f"> 💡 **الرابط المباشر:** [اضغط هنا للفتح المباشر لكلمة '{selected_kw}' في الجزائر]({search_link})")
+        st.divider()
+
+        st.subheader("📥 استيراد بيانات الإعلانات المكتشفة")
+        st.caption("الأعمدة المطلوبة: url, store, start (YYYY-MM-DD) — صف لكل نسخة إعلانية.")
         csv_up = st.file_uploader("ملف CSV", type=["csv"], key="adscsv")
         pasted = st.text_area("أو الصق CSV هنا", "url,store,start\n", height=120)
         try:
             df_in = pd.read_csv(csv_up) if csv_up else pd.read_csv(io.StringIO(pasted))
             rows = df_in.fillna("").to_dict("records")
-        except Exception as e:  # noqa: BLE001
-            st.error(f"تعذرت قراءة الجدول: {e}")
+        except Exception as e:
+            if csv_up or (pasted and len(pasted.strip().splitlines()) > 1):
+                st.error(f"تعذرت قراءة الجدول: {e}")
 
     if rows:
         grouped = filter_and_group(rows, min_age)
         st.success(f"{len(grouped)} حملة معمّرة (≥ {min_age} أيام) من أصل {len(rows)} إعلان")
         st.session_state["candidates"] = grouped
+        
     cands = st.session_state.get("candidates", [])
     if cands:
         st.dataframe(pd.DataFrame(cands), use_container_width=True)
-        if st.button("⚙️ افحص مخزون كل المرشحين"):
+        if st.button("⚙️ افحص مخزون كل المرشحين أوتوماتيكياً"):
             prog = st.progress(0.0)
             for i, c in enumerate(cands):
                 if c["url"]:
@@ -522,7 +549,7 @@ with tab_disc:
                         }
                     )
                 prog.progress((i + 1) / len(cands))
-                time.sleep(1)  # لطف مع المواقع
+                time.sleep(1)
             st.success("تم الحفظ. أكمل التحليل من تبويب «تحليل منتج».")
 
 # ── تبويب تحليل منتج ──
@@ -603,3 +630,4 @@ with tab_res:
         e2.download_button(
             "⬇️ JSON", df.to_json(orient="records", force_ascii=False), "report.json", "application/json"
         )
+    
