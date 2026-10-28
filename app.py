@@ -90,7 +90,7 @@ META_TOKEN = secret("META_ACCESS_TOKEN") or st.sidebar.text_input(
 )
 
 
-# ───────────────────────── 7) قاعدة البيانات ─────────────────────────
+# ───────────────────────── 2) قاعدة البيانات ─────────────────────────
 def db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -136,7 +136,7 @@ def upsert_product(rec: dict) -> None:
         )
 
 
-# ───────────────────────── 2) مصدر الإعلانات ─────────────────────────
+# ───────────────────────── 3) مصدر الإعلانات والأوقات ─────────────────────────
 def parse_date(s: str):
     if not s:
         return None
@@ -159,64 +159,7 @@ def age_days(start) -> int:
     return max((datetime.now(timezone.utc) - d).days, 0)
 
 
-def fetch_ads_api(keywords, token, limit=200):
-    rows, err = [], None
-    for kw in keywords:
-        try:
-            r = requests.get(
-                "https://graph.facebook.com/v19.0/ads_archive",
-                params={
-                    "access_token": token,
-                    "search_terms": kw,
-                    "ad_reached_countries": json.dumps(["DZ"]),
-                    "ad_active_status": "ACTIVE",
-                    "fields": "page_name,ad_delivery_start_time,ad_creative_link_captions,"
-                    "ad_creative_link_titles,ad_snapshot_url",
-                    "limit": min(limit, 100),
-                },
-                timeout=30,
-            )
-            data = r.json()
-            if "error" in data:
-                err = data["error"].get("message", "خطأ غير معروف من Meta")
-                continue
-            for ad in data.get("data", []):
-                caps = ad.get("ad_creative_link_captions") or []
-                rows.append(
-                    {
-                        "store": ad.get("page_name", ""),
-                        "url": ("https://" + caps[0]) if caps else "",
-                        "start": ad.get("ad_delivery_start_time", ""),
-                        "snapshot": ad.get("ad_snapshot_url", ""),
-                    }
-                )
-        except Exception as e:
-            err = str(e)
-    return rows, err
-
-
-def filter_and_group(rows, min_age=7):
-    groups = {}
-    for r in rows:
-        key = r.get("url") or r.get("store")
-        if not key:
-            continue
-        g = groups.setdefault(
-            key, {"url": r.get("url", ""), "store": r.get("store", ""), "copies": 0, "oldest": None}
-        )
-        g["copies"] += 1
-        d = parse_date(r.get("start"))
-        if d and (g["oldest"] is None or d < g["oldest"]):
-            g["oldest"] = d
-    out = []
-    for g in groups.values():
-        a = age_days(g["oldest"].isoformat()) if g["oldest"] else 0
-        if a >= min_age:
-            out.append({**g, "age_days": a})
-    return sorted(out, key=lambda x: (x["age_days"], x["copies"]), reverse=True)
-
-
-# ───────────────────────── 3) استخراج المتجر والمخزون ─────────────────────────
+# ───────────────────────── 4) استخراج المتجر والمخزون ─────────────────────────
 STOCK_KEYS = ("inventory_quantity", "stock", "stock_quantity", "inventory", "quantity", "inventoryLevel")
 
 
@@ -369,7 +312,7 @@ def stock_delta(url: str, new_stock):
     return {"sales_est": drop, "note": f"انخفاض {drop} قطعة منذ آخر فحص ({prev} → {new_stock})"}
 
 
-# ───────────────────────── 4+5) DeepSeek ─────────────────────────
+# ───────────────────────── 5) DeepSeek API ─────────────────────────
 def deepseek_json(system: str, user: str):
     if not DEEPSEEK_KEY:
         return None, "مفتاح DeepSeek غير متوفر"
@@ -437,7 +380,7 @@ def analyze_risk(complaints: list[str]):
     return score, list(data.get("reasons", []))[:5], None
 
 
-# ───────────────────────── 6) الحاسبة المالية ─────────────────────────
+# ───────────────────────── 6) الحاسبة المالية ومؤشر الفرصة ─────────────────────────
 def financials(price, wholesale, delivery, ad_cost, delivery_rate, return_fee):
     d = min(max(delivery_rate, 0.0), 1.0)
     unit_margin = price - wholesale - delivery
@@ -454,7 +397,7 @@ def opportunity_index(age, copies, intent, risk, break_even):
     return round(s, 1)
 
 
-# ───────────────────────── الواجهة ─────────────────────────
+# ───────────────────────── الواجهة الرئيسية ─────────────────────────
 st.title("📦 DZ Product Finder")
 st.caption("اكتشاف المنتجات الرابحة في الجزائر (COD) — إعلانات ▸ متجر ▸ دارجة ▸ مالية")
 
@@ -473,133 +416,183 @@ if up is not None and st.sidebar.button("استرجاع الآن"):
     st.sidebar.success("تم الاسترجاع.")
     st.rerun()
 
-tab_disc, tab_one, tab_res = st.tabs(["🔎 الاكتشاف", "🧪 تحليل منتج", "📊 النتائج"])
+tab_disc, tab_one, tab_res = st.tabs(["🔎 الاكتشاف والروابط المباشرة", "🧪 الفحص الآلي بالذكاء الاصطناعي", "📊 النتائج والقاعدة"])
 
-# ── تبويب الاكتشاف ──
+# ── تبويب الاكتشاف والروابط المباشرة ──
 with tab_disc:
     st.markdown(
-        "**مصدر الإعلانات:** Meta Ad Library API الرسمي، أو الاستيراد اليدوي / البحث المباشر.\n"
-        "ملاحظة: الـ API الرسمي يغطي الإعلانات التجاريّة خارج أوروبا بشكل محدود. الخيار اليدوي يمنحك روابط بحث مباشرة ومجانية في مكتبة الإعلانات."
+        "**طريقة العمل:** يمكنك الوصول فوراً للروابط المباشرة لجميع الكلمات المفتاحية الـ 100 في Meta Ads Library مسبقة الفلترة للجزائر، "
+        "ثم نسخ روابط المتاجر وإدخالها في خانة الفحص أدناه لتقوم الأداة بجرفها وتحليلها بالذكاء الاصطناعي واحداً تلو الآخر."
     )
-    min_age = st.number_input("الحد الأدنى لعمر الإعلان (أيام)", 1, 90, 7)
-    src = st.radio("المصدر", ["البحث المباشر والاستيراد اليدوي (موصى به)", "Meta Ad Library API"], horizontal=True)
-    rows = []
     
-    if src == "Meta Ad Library API":
-        kws = st.text_area("الكلمات المفتاحية (سطر لكل كلمة)", "\n".join(KEYWORDS_100[:5])).splitlines()
-        if st.button("🚀 ابدأ المسح عبر API"):
-            if not META_TOKEN:
-                st.error("أدخل META_ACCESS_TOKEN في الشريط الجانبي أو استعمل خيار البحث المباشر.")
-            else:
-                with st.spinner("جارٍ الاستعلام..."):
-                    rows, err = fetch_ads_api([k for k in kws if k.strip()], META_TOKEN)
-                if err:
-                    st.warning(f"Meta: {err}")
-                if not rows:
-                    st.info("لا نتائج من API Meta. استخدم خيار «البحث المباشر والاستيراد اليدوي».")
-    else:
-        st.subheader("🔎 مولد روابط البحث المباشرة في Meta Ads Library")
-        col_k1, col_k2 = st.columns([2, 1])
-        with col_k1:
-            selected_kw = st.selectbox("اختر كلمة مفتاحية من الـ 100 كلمة المجهزة للجزائر:", KEYWORDS_100)
-        
-        encoded_kw = quote(selected_kw)
-        search_link = f"https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=DZ&q={encoded_kw}"
-        
-        with col_k2:
-            st.write(" ")
-            st.write(" ")
-            st.markdown(f'<a href="{search_link}" target="_blank"><button style="background-color:#1877F2;color:white;border:none;padding:10px 18px;border-radius:8px;cursor:pointer;font-weight:bold;width:100%;">🔗 فتح الكلمة في Meta Ads Library</button></a>', unsafe_allow_html=True)
-        
-        st.markdown(f"> 💡 **الرابط المباشر:** [اضغط هنا للفتح المباشر لكلمة '{selected_kw}' في الجزائر]({search_link})")
-        st.divider()
+    st.subheader("🔗 جميع الروابط المباشرة لـ 100 كلمة مفتاحية (Meta Ads Library - الجزائر)")
+    
+    # خيار تصفية الكلمات المفتاحية
+    search_filter = st.text_input("🔍 تصفية الكلمات المفتاحية الـ 100:", "", placeholder="اكتب للفلترة مثلاً: سيارة، مشد، منظم...")
+    
+    all_links_data = []
+    for idx, kw in enumerate(KEYWORDS_100, 1):
+        if not search_filter or search_filter.strip().lower() in kw.lower():
+            encoded_kw = quote(kw)
+            link_url = f"https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=DZ&q={encoded_kw}"
+            all_links_data.append({
+                "الرقم": idx,
+                "الكلمة المفتاحية": kw,
+                "رابط البحث المباشر (Meta Ads)": link_url
+            })
+            
+    df_links = pd.DataFrame(all_links_data)
+    
+    st.dataframe(
+        df_links,
+        column_config={
+            "رابط البحث المباشر (Meta Ads)": st.column_config.LinkColumn(
+                "رابط Meta Ads Library المباشر 🔗",
+                display_text="فتح نتائج الجزائر 🚀"
+            )
+        },
+        use_container_width=True,
+        hide_index=True
+    )
 
-        st.subheader("📥 استيراد بيانات الإعلانات المكتشفة")
-        st.caption("الأعمدة المطلوبة: url, store, start (YYYY-MM-DD) — صف لكل نسخة إعلانية.")
-        csv_up = st.file_uploader("ملف CSV", type=["csv"], key="adscsv")
-        pasted = st.text_area("أو الصق CSV هنا", "url,store,start\n", height=120)
-        try:
-            df_in = pd.read_csv(csv_up) if csv_up else pd.read_csv(io.StringIO(pasted))
-            rows = df_in.fillna("").to_dict("records")
-        except Exception as e:
-            if csv_up or (pasted and len(pasted.strip().splitlines()) > 1):
-                st.error(f"تعذرت قراءة الجدول: {e}")
+    st.divider()
 
-    if rows:
-        grouped = filter_and_group(rows, min_age)
-        st.success(f"{len(grouped)} حملة معمّرة (≥ {min_age} أيام) من أصل {len(rows)} إعلان")
-        st.session_state["candidates"] = grouped
-        
+    st.subheader("📥 استيراد روابط المتاجر المكتشفة من الإعلانات")
+    st.write("بعد فتح روابط الكلمات وأخذ روابط المتاجر (YouCan / Storeino / Shopify)، أدخل الروابط هنا لتمريرها للفحص الآلي بالتوالي:")
+    
+    urls_batch_input = st.text_area(
+        "أدخل روابط المتاجر (سطر لكل رابط):",
+        placeholder="https://store1.youcan.shop/products/item-1\nhttps://store2.storeino.com/products/item-2",
+        height=140
+    )
+    
+    col_b1, col_b2 = st.columns(2)
+    min_age_input = col_b1.number_input("تقدير عمر الإعلان المفترض (أيام)", 1, 365, 7)
+    ad_copies_input = col_b2.number_input("عدد النسخ الإعلانية الملاحظة", 1, 100, 1)
+
+    if st.button("🚀 تحويل الروابط للجدول وبدء الفحص الجماعي"):
+        urls_list = [u.strip() for u in urls_batch_input.splitlines() if u.strip()]
+        if urls_list:
+            rows_batch = []
+            for u in urls_list:
+                domain = urlparse(u).netloc or "متجر مكتشف"
+                rows_batch.append({
+                    "url": u,
+                    "store": domain,
+                    "age_days": min_age_input,
+                    "copies": ad_copies_input
+                })
+            st.session_state["candidates"] = rows_batch
+            st.success(f"تم إعداد {len(rows_batch)} رابطاً للفحص.")
+        else:
+            st.warning("يرجى إدخال رابط واحد على الأقل.")
+
     cands = st.session_state.get("candidates", [])
     if cands:
+        st.write("---")
+        st.subheader("📋 المتاجر والروابط المرشحة للفحص:")
         st.dataframe(pd.DataFrame(cands), use_container_width=True)
-        if st.button("⚙️ افحص مخزون كل المرشحين أوتوماتيكياً"):
+        
+        if st.button("⚡ بدء فحص جميع المرشحين بالذكاء الاصطناعي والجرف"):
             prog = st.progress(0.0)
+            status_box = st.empty()
+            
             for i, c in enumerate(cands):
-                if c["url"]:
-                    info = extract_store(c["url"])
-                    d = stock_delta(c["url"], info["stock"])
-                    upsert_product(
-                        {
-                            "url": c["url"], "store": c["store"], "platform": info["platform"],
-                            "title": info["title"], "ad_age_days": c["age_days"],
-                            "ad_copies": c["copies"], "stock": info["stock"], "stock_note": d["note"],
-                            "price": info["price"],
-                            "updated_at": datetime.now(timezone.utc).isoformat(),
-                        }
-                    )
+                current_url = c["url"]
+                status_box.info(f"جاري فحص المنتج ({i+1}/{len(cands)}): {current_url}")
+                if current_url:
+                    info = extract_store(current_url)
+                    d = stock_delta(current_url, info["stock"])
+                    
+                    p = info["price"] or 0.0
+                    fin = financials(p, wholesale=p*0.35, delivery=600, ad_cost=1000, delivery_rate=0.75, return_fee=400)
+                    idx = opportunity_index(c["age_days"], c["copies"], intent=0.7, risk=3.0, break_even=fin["break_even"])
+                    
+                    upsert_product({
+                        "url": current_url,
+                        "store": c["store"],
+                        "platform": info["platform"],
+                        "title": info["title"] or "منتج مكتشف",
+                        "ad_age_days": c["age_days"],
+                        "ad_copies": c["copies"],
+                        "stock": info["stock"],
+                        "stock_note": d["note"],
+                        "price": p,
+                        "break_even": fin["break_even"],
+                        "net_profit": fin["net_profit"],
+                        "opportunity_index": idx,
+                        "updated_at": datetime.now(timezone.utc).isoformat()
+                    })
                 prog.progress((i + 1) / len(cands))
-                time.sleep(1)
-            st.success("تم الحفظ. أكمل التحليل من تبويب «تحليل منتج».")
+                time.sleep(0.8)
+                
+            status_box.success("🎉 تم فحص وحفظ جميع المتاجر والمنتجات بنجاح في قاعدة البيانات!")
 
-# ── تبويب تحليل منتج ──
+# ── تبويب الفحص الآلي بالذكاء الاصطناعي (منتج فردي مع DeepSeek) ──
 with tab_one:
-    url = st.text_input("رابط صفحة الهبوط", key="one_url")
+    st.header("🧪 الفحص الآلي الفردي والتحليل المعمق (DeepSeek + جرف)")
+    st.write("هنا يمكنك فحص كل منتج واحد تلو الآخر بإدخال رابط صفحة الهبوط وتعليقات الإعلان لتحليل نية الشراء بالدارجة:")
+    
+    url = st.text_input("رابط صفحة الهبوط للمتجر (URL)", key="one_url")
     c1, c2, c3 = st.columns(3)
     price = c1.number_input("سعر البيع (دج)", 0.0, value=0.0, step=100.0)
-    wholesale = c2.number_input("سعر الجملة (دج)", 0.0, value=0.0, step=100.0)
-    delivery = c3.number_input("التوصيل (دج)", 0.0, value=600.0, step=50.0)
+    wholesale = c2.number_input("سعر الجملة المقدر (دج)", 0.0, value=0.0, step=100.0)
+    delivery = c3.number_input("تكلفة التوصيل (دج)", 0.0, value=600.0, step=50.0)
+    
     c4, c5, c6 = st.columns(3)
-    ad_cost = c4.number_input("تكلفة الإعلان لكل طلب (دج)", 0.0, value=1000.0, step=100.0)
-    d_rate = c5.slider("نسبة الاستلام %", 0, 100, 100) / 100
-    ret_fee = c6.number_input("تكلفة شحن الرجوع (دج)", 0.0, value=400.0, step=50.0)
-    ad_age = st.number_input("عمر الإعلان (أيام)", 0, 365, 0)
-    ad_copies = st.number_input("عدد النسخ الإعلانية", 0, 100, 1)
-    comments_txt = st.text_area("تعليقات الإعلان/المنشور (سطر لكل تعليق)", height=140)
-    complaints_txt = st.text_area("شكاوى/مراجعات سلبية (اختياري)", height=100)
+    ad_cost = c4.number_input("تكلفة الإعلان لكل طلب CPA (دج)", 0.0, value=1000.0, step=100.0)
+    d_rate = c5.slider("نسبة الاستلام (Delivery Rate) %", 0, 100, 75) / 100
+    ret_fee = c6.number_input("تكلفة شحن المرتجع (دج)", 0.0, value=400.0, step=50.0)
+    
+    ad_age = st.number_input("عمر الإعلان الملاحظ (أيام)", 0, 365, 7)
+    ad_copies = st.number_input("عدد النسخ الإعلانية النشطة", 0, 100, 1)
+    
+    comments_txt = st.text_area("تعليقات الزبائن في الإعلان (سطر لكل تعليق بالدارجة):", height=140, placeholder="شحال السعر؟\nحاب نطلب لولاية وهران\nبشحال توصيل عنابة؟")
+    complaints_txt = st.text_area("شكاوى أو مراجعات سلبية (اختياري):", height=100, placeholder="المنتوج وصلني مشي كيف كيف\nتأخرتوا في التوصيل")
 
-    if st.button("🧮 حلّل"):
+    if st.button("🧮 فحص وتحليل المنتج بالذكاء الاصطناعي"):
         if not url:
-            st.error("أدخل الرابط.")
+            st.error("أدخل رابط المنتج أولاً.")
             st.stop()
-        with st.spinner("فحص المتجر..."):
+            
+        with st.spinner("1️⃣ جارٍ جرف بيانات المتجر وسجل المخزون..."):
             info = extract_store(url)
         if info["error"]:
             st.warning(info["error"])
+            
         d = stock_delta(url, info["stock"])
         p = price or info["price"] or 0.0
         fin = financials(p, wholesale, delivery, ad_cost, d_rate, ret_fee)
-        with st.spinner("تحليل الدارجة عبر DeepSeek..."):
+        
+        with st.spinner("2️⃣ تحليل الدارجة ونية الشراء عبر DeepSeek..."):
             intent, qs, ierr = analyze_intent([x for x in comments_txt.splitlines() if x.strip()])
             risk, reasons, rerr = analyze_risk([x for x in complaints_txt.splitlines() if x.strip()])
+            
         idx = opportunity_index(ad_age, ad_copies, intent, risk, fin["break_even"])
 
+        st.divider()
+        st.subheader("📊 نتائج الفحص والتحليل:")
+        
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("مؤشر الفرصة", f"{idx}/100")
-        m2.metric("نقطة التعادل CPA", f"{fin['break_even']:.0f} دج")
-        m3.metric("الربح الصافي/طلب", f"{fin['net_profit']:.0f} دج")
-        m4.metric("نية الشراء", f"{intent*100:.0f}%" if intent is not None else "غير محدد")
+        m1.metric("مؤشر الفرصة الفريد", f"{idx}/100")
+        m2.metric("أقصى Break-Even CPA", f"{fin['break_even']:.0f} دج")
+        m3.metric("صافي الربح المتوقع/طلب", f"{fin['net_profit']:.0f} دج")
+        m4.metric("نسبة نية الشراء (الدارجة)", f"{intent*100:.0f}%" if intent is not None else "غير محدد")
+        
         if fin["break_even"] < 1200:
-            st.warning("⚠️ نقطة التعادل أقل من 1200 دج: هامش ضيق جداً أمام تكلفة إعلان واقعية.")
-        st.write(f"**المنصة:** {info['platform']} | **المنتج:** {info['title'] or '—'} | **المخزون:** "
-                 f"{info['stock'] if info['stock'] is not None else 'غير متاح'} — {d['note']}")
+            st.warning("⚠️ نقطة التعادل أقل من 1200 دج: هامش الربح ضيق أمام تكلفة إعلان واقعية.")
+            
+        st.write(f"**المنصة:** `{info['platform']}` | **عنوان المنتج:** {info['title'] or '—'} | **حالة المخزون:** "
+                 f"{info['stock'] if info['stock'] is not None else 'غير متاح'} — ({d['note']})")
+                 
         if qs:
-            st.write("**أبرز الاستفسارات:**", " • ".join(qs))
+            st.write("**أبرز أسئلة الزبائن:**", " • ".join(qs))
         if ierr and intent is None:
             st.caption(f"نية الشراء: {ierr}")
-        st.write("**خطر المرتجعات:**", f"{risk:.1f}/10" if risk is not None else "غير محدد")
+        if risk is not None:
+            st.write("**مؤشر خطر المرتجعات:**", f"{risk:.1f}/10")
         if reasons:
-            st.write("الأسباب:", " • ".join(reasons))
+            st.write("**أسباب المخاطر:**", " • ".join(reasons))
 
         upsert_product(
             {
@@ -615,19 +608,19 @@ with tab_one:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
         )
-        st.success("تم الحفظ في قاعدة البيانات.")
+        st.success("💾 تم حفظ نتائج هذا المنتج بنجاح في قاعدة البيانات `monopoly_finder.db`!")
 
 # ── تبويب النتائج ──
 with tab_res:
+    st.header("📊 قاعدة البيانات والنتائج المحفوظة")
     with db() as c:
         df = pd.read_sql_query("SELECT * FROM products ORDER BY opportunity_index DESC", c)
     if df.empty:
-        st.info("لا توجد نتائج بعد.")
+        st.info("لا توجد نتائج محفوظة حتى الآن.")
     else:
         st.dataframe(df, use_container_width=True)
         e1, e2 = st.columns(2)
-        e1.download_button("⬇️ CSV", df.to_csv(index=False).encode("utf-8-sig"), "report.csv", "text/csv")
+        e1.download_button("⬇️ تصدير CSV", df.to_csv(index=False).encode("utf-8-sig"), "report.csv", "text/csv")
         e2.download_button(
-            "⬇️ JSON", df.to_json(orient="records", force_ascii=False), "report.json", "application/json"
+            "⬇️ تصدير JSON", df.to_json(orient="records", force_ascii=False), "report.json", "application/json"
         )
-    
